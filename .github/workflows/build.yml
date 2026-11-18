@@ -5,6 +5,12 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to build and publish (for example, v1.0.9)
+        required: true
+        type: string
 
 # Read-only by default: builds of pull requests cannot change the repository or releases.
 permissions:
@@ -14,8 +20,18 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
+      - name: Validate release tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Expected a version tag such as v1.0.9' }
+
       # Actions are pinned to exact commits so a moved tag cannot swap in different code.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || '' }}
 
       - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         with:
@@ -36,8 +52,10 @@ jobs:
 
       - name: Build installer and portable zip
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          $version = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { '0.0.0' }
+          $version = if ($env:RELEASE_TAG) { $env:RELEASE_TAG.Substring(1) } elseif ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { '0.0.0' }
           ./installer/build-installer.ps1 -Version $version
 
       - name: Fetch HeadsetControl source (GPL corresponding source for the bundled binary)
@@ -51,10 +69,10 @@ jobs:
           name: WirelessBattery
           path: dist/*
 
-  # Only this job can publish, and only for version tags pushed by the maintainer.
+  # Publish version tags from a tag push or a manual recovery run.
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -66,20 +84,23 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: dist/*
-          append_body: true
-          body: |
-            Enjoying Wireless Battery? Support it on [Ko-fi](https://ko-fi.com/krisgfx), [PayPal](https://www.paypal.com/paypalme/krisgfx) or [GitHub Sponsors](https://github.com/sponsors/krisgfx9).
+          append_body: ${{ github.event_name != 'workflow_dispatch' }}
+          body: ${{ github.event_name != 'workflow_dispatch' && 'Enjoying Wireless Battery? Support it on [Ko-fi](https://ko-fi.com/krisgfx), [PayPal](https://www.paypal.com/paypalme/krisgfx) or [GitHub Sponsors](https://github.com/sponsors/krisgfx9).' || '' }}
 
       # Announce the release on Discord: first what changed, then the newly supported devices.
       # The webhook lives in the DISCORD_WEBHOOK repository secret, never in the code. A failed post
       # does not fail the release.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || '' }}
           fetch-depth: 0
       - name: Announce on Discord
+        if: github.event_name != 'workflow_dispatch'
         continue-on-error: true
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/discord-release.py --tag "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+        run: python3 scripts/discord-release.py --tag "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
