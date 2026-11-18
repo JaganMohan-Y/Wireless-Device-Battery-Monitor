@@ -16,6 +16,10 @@ bool g_background;  // opaque rounded plate behind the text, for transparent / r
 bool g_stacked;     // icon above the percentage (menu option, PR #525)
 bool g_vertical;    // the primary taskbar is docked left or right: one block per device, stacked (PR #321)
 std::vector<WidgetItem> g_items;
+constexpr UINT_PTR kHeadsetPulseTimer = 1;
+constexpr ULONGLONG kHeadsetPulseDuration = 1000;
+ULONGLONG g_headsetPulseUntil = 0;
+std::wstring g_pulsingHeadset;
 std::wstring g_tipText;
 RECT g_lastTray{}, g_lastBar{}, g_lastWidgets{};
 int g_lastW = -1, g_lastDpi = 0, g_lastLeft = -1;
@@ -357,6 +361,33 @@ Mask Halo(const Mask& m, int r) {
     return g;
 }
 
+Mask SonyHeadsetMask(int size, char layer) {
+    static constexpr char art[16][17] = {
+        "................",
+        ".....######.....",
+        "...##########...",
+        "..###......###..",
+        "..##........##..",
+        ".##..........##.",
+        ".##..........##.",
+        ".##..........##.",
+        ".##..........##.",
+        ".####......####.",
+        ".#++##....##++#.",
+        ".#+++##..##+++#.",
+        ".#+++##..##+++#.",
+        "..#++##..##++#..",
+        "...###....###...",
+        "................",
+    };
+    Mask mask{size, size, std::vector<BYTE>((size_t)size * size)};
+    for (int y = 0; y < size; ++y)
+        for (int x = 0; x < size; ++x)
+            if (art[y * 16 / size][x * 16 / size] == layer)
+                mask.a[y * size + x] = 255;
+    return mask;
+}
+
 // One drawn piece of the strip. Normal pieces follow each other from left to right. A piece with an
 // `anchor` (index of an earlier piece) is a caption: drawn over that piece, `bx`/`by` from its top-left
 // corner, and taking no room of its own. Branded devices add a glow behind the glyph and a level bar.
@@ -371,6 +402,8 @@ struct Piece {
     Rgb barColor{};
     Mask halo;        // glow drawn behind the glyph (branded devices)
     int haloR = 0, haloAlpha = 0;
+    Mask detail;
+    Rgb detailColor{};
     int px = INT_MIN, py = 0;  // fixed top-left position (stacked and vertical layouts); INT_MIN = flow left to right
 };
 
@@ -406,7 +439,22 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
         if (!branded && it.kind == DeviceKind::Headset)
             iconColor = g_light ? Rgb{ 104, 49, 176 } : Rgb{ 194, 160, 255 };
         Piece icon{ RenderMask(std::wstring(1, Glyph(it.kind, it.bluetooth)), icons, g_light), iconColor, a, Px(5) };
-        if (branded && !it.dim) {
+        if (!it.sonyHeadsetKey.empty()) {
+            const int size = Px(16);
+            icon.m = SonyHeadsetMask(size, '#');
+            icon.color = g_light ? Rgb{ 42, 49, 61 } : Rgb{ 185, 196, 215 };
+            icon.detail = SonyHeadsetMask(size, '+');
+            icon.detailColor = g_light ? Rgb{ 105, 117, 138 } : Rgb{ 81, 100, 129 };
+            const auto now = GetTickCount64();
+            if (!it.dim && it.sonyHeadsetKey == g_pulsingHeadset && now < g_headsetPulseUntil) {
+                const int remaining = (int)(g_headsetPulseUntil - now);
+                const int strength = std::min(remaining, (int)kHeadsetPulseDuration - remaining) * 255 / 500;
+                const Rgb blue = g_light ? Rgb{ 0, 93, 190 } : Rgb{ 67, 194, 255 };
+                auto mix = [strength](int base, int peak) { return base + (peak - base) * strength / 255; };
+                icon.detailColor = { mix(icon.detailColor.r, blue.r), mix(icon.detailColor.g, blue.g),
+                                     mix(icon.detailColor.b, blue.b) };
+            }
+        } else if (branded && !it.dim) {
             icon.haloR = Px(3);
             icon.halo = Halo(icon.m, icon.haloR);
             icon.haloAlpha = g_light ? 60 : 140;
@@ -548,6 +596,7 @@ void PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size) {
                     if (ox || oy) cv.Draw(p.m, xs[i] + ox, ys[i] + oy, barColor, 255);
         }
         cv.Draw(p.m, xs[i], ys[i], p.color, p.alpha);
+        if (p.detail.w) cv.Draw(p.detail, xs[i], ys[i], p.detailColor, p.alpha);
     }
 
     HDC screen = GetDC(nullptr);
@@ -775,6 +824,13 @@ void SetHover(HWND h, bool on) {
 
 LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_TIMER:
+            if (h == g_wnd && wp == kHeadsetPulseTimer) {
+                if (GetTickCount64() >= g_headsetPulseUntil) KillTimer(h, kHeadsetPulseTimer);
+                PaintAll();
+                return 0;
+            }
+            break;
         case WM_MOUSEMOVE: {
             TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, 0 };
             TrackMouseEvent(&t);
@@ -873,6 +929,19 @@ void Destroy() {
 bool Alive() { return g_wnd && IsWindow(g_wnd) && g_taskbar && IsWindow(g_taskbar); }
 
 void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip) {
+    for (const auto& item : items) {
+        if (item.sonyHeadsetKey.empty() || item.dim) continue;
+        const bool alreadyShown = std::any_of(g_items.begin(), g_items.end(), [&](const WidgetItem& old) {
+            return old.sonyHeadsetKey == item.sonyHeadsetKey && !old.dim;
+        });
+        BOOL animations = FALSE;
+        if (!alreadyShown && g_wnd &&
+            SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0) && animations &&
+            SetTimer(g_wnd, kHeadsetPulseTimer, 50, nullptr)) {
+            g_pulsingHeadset = item.sonyHeadsetKey;
+            g_headsetPulseUntil = GetTickCount64() + kHeadsetPulseDuration;
+        }
+    }
     g_items = items;
     if (tooltip != g_tipText && g_tip) {
         g_tipText = tooltip;

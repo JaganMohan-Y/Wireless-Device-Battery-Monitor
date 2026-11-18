@@ -149,6 +149,13 @@ BrandColor AccentColor(Accent a, bool lightTaskbar) {
     return lightTaskbar ? b.light : b.dark;
 }
 
+bool IsSonyOverEar(const DeviceStatus& s) {
+    if (s.kind != DeviceKind::Headset) return false;
+    const auto n = Lower(s.name);
+    return StartsWith(n, L"wh-") ||
+           (HasWord(n, L"sony") && n.find(L"wh-") != std::wstring::npos);
+}
+
 Accent BrandOf(const DeviceStatus& s) {
     for (const auto& k : kKeys)
         if (StartsWith(s.key, k.prefix)) return k.a;

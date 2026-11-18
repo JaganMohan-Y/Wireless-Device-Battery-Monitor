@@ -26,3 +26,4 @@ BrandColor AccentColor(Accent a, bool lightTaskbar);
 
 // Picks the brand from the driver key ("steelseries:..."), then the USB / Bluetooth vendor id, then the name.
 Accent BrandOf(const DeviceStatus& s);
+bool IsSonyOverEar(const DeviceStatus& s);

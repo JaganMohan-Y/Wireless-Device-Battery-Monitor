@@ -473,7 +473,8 @@ void UpdateWidget() {
         it.dim = e->st.percent < 0;
         it.low = !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
         it.bluetooth = e->st.via == L"Bluetooth";
-        it.label = labels[items.size()];
+        if (IsSonyOverEar(e->st)) it.sonyHeadsetKey = e->st.key;
+        else it.label = labels[items.size()];
         it.accent = AccentFor(e->st);
         items.push_back(it);
         if (!tip.empty()) tip += L"\n";
